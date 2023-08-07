@@ -1,6 +1,7 @@
 // Package mysql wraps mysql driver as an adapter for REL.
 //
 // Usage:
+//
 //	// open mysql connection.
 //	// note: `clientFoundRows=true` is required for update and delete to works correctly.
 //	adapter, err := mysql.Open("root@(127.0.0.1:3306)/rel_test?clientFoundRows=true&charset=utf8&parseTime=True&loc=Local")
@@ -14,8 +15,8 @@
 package mysql
 
 import (
-	"context"
 	db "database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/go-rel/rel"
@@ -37,7 +38,7 @@ func New(database *db.DB) rel.Adapter {
 		deleteBuilder     = builder.Delete{BufferFactory: bufferFactory, Query: queryBuilder, Filter: filterBuilder}
 		ddlBufferFactory  = builder.BufferFactory{InlineValues: true, BoolTrueValue: "true", BoolFalseValue: "false", Quoter: Quote{}, ValueConverter: ValueConvert{}}
 		ddlQueryBuilder   = builder.Query{BufferFactory: ddlBufferFactory, Filter: filterBuilder}
-		tableBuilder      = builder.Table{BufferFactory: ddlBufferFactory, ColumnMapper: columnMapper}
+		tableBuilder      = builder.Table{BufferFactory: ddlBufferFactory, ColumnMapper: columnMapper, DropKeyMapper: dropKeyMapper}
 		indexBuilder      = builder.Index{BufferFactory: ddlBufferFactory, Query: ddlQueryBuilder, Filter: filterBuilder, DropIndexOnTable: true}
 	)
 
@@ -49,7 +50,7 @@ func New(database *db.DB) rel.Adapter {
 		DeleteBuilder:    deleteBuilder,
 		TableBuilder:     tableBuilder,
 		IndexBuilder:     indexBuilder,
-		IncrementFunc:    incrementFunc,
+		Increment:        getIncrement(database),
 		ErrorMapper:      errorMapper,
 		DB:               database,
 	}
@@ -57,6 +58,11 @@ func New(database *db.DB) rel.Adapter {
 
 // Open mysql connection using dsn.
 func Open(dsn string) (rel.Adapter, error) {
+	var database, err = db.Open("mysql", rewriteDsn(dsn))
+	return New(database), err
+}
+
+func rewriteDsn(dsn string) string {
 	// force clientFoundRows=true
 	// this allows not found record check when updating a record.
 	if strings.ContainsRune(dsn, '?') {
@@ -65,8 +71,7 @@ func Open(dsn string) (rel.Adapter, error) {
 		dsn += "?clientFoundRows=true"
 	}
 
-	var database, err = db.Open("mysql", dsn)
-	return New(database), err
+	return dsn
 }
 
 // MustOpen mysql connection using dsn.
@@ -79,18 +84,15 @@ func MustOpen(dsn string) rel.Adapter {
 	return adapter
 }
 
-func incrementFunc(adapter sql.SQL) int {
+func getIncrement(database *db.DB) int {
 	var (
 		variable  string
 		increment int
-		rows, err = adapter.DoQuery(context.TODO(), "SHOW VARIABLES LIKE 'auto_increment_increment';", nil)
 	)
 
-	check(err)
-
-	defer rows.Close()
-	rows.Next()
-	check(rows.Scan(&variable, &increment))
+	if database != nil {
+		check(database.QueryRow("SHOW VARIABLES LIKE 'auto_increment_increment';").Scan(&variable, &increment))
+	}
 
 	return increment
 }
@@ -135,6 +137,14 @@ func columnMapper(column *rel.Column) (string, int, int) {
 	default:
 		return sql.ColumnMapper(column)
 	}
+}
+
+func dropKeyMapper(typ rel.KeyType) string {
+	if typ == rel.ForeignKey {
+		return "FOREIGN KEY"
+	}
+
+	panic(fmt.Sprintf("drop key: unsupported key type `%s`", typ))
 }
 
 func check(err error) {
